@@ -159,7 +159,7 @@ int moa_binderlike_queue_getmsg(struct moa_binderlike_chan *chan, char *buf,
 		return -ENOTTY;
 	}
 
-	if (!buf || len < sizeof(q->msgs[0].content) + 1) {
+	if (!buf || len < sizeof(q->msgs[0].content)) {
 		log_err("buf %px, len %d wrong", buf, len);
 		return -ENOSPC;
 	}
@@ -255,7 +255,7 @@ ssize_t moa_binderlike_write(struct file *filp, const char __user *buf,
 		return ret;
 	}
 
-	sbuf[len - 1] = '\0';
+	sbuf[len] = '\0';
 
 	return moa_binderlike_queue_addmsg(chan, sbuf, len);
 }
