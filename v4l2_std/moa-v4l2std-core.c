@@ -137,7 +137,7 @@ static int moa_v4l2std_try_fmt(struct file *file, void *fh,
 
 	/* TODO: fix the size of image */
 	mp->width = 1920;
-	mp->width = 1080;
+	mp->height = 1080;
 
 	mp->num_planes = fmt->buffers;
 	for (p = 0; p < mp->num_planes; p++) {
@@ -167,8 +167,8 @@ static int moa_v4l2std_set_fmt_mp(struct file *file, void *priv,
 	struct vb2_queue *q = dev->queue;
 	struct moa_v4l2std_device *mdev =
 		container_of(dev, typeof(*mdev), port_dev);
-	int ret = moa_v4l2std_try_fmt(file, priv, f);
 
+	int ret = moa_v4l2std_try_fmt(file, priv, f);
 	if (ret < 0)
 		return ret;
 
@@ -190,8 +190,43 @@ static int moa_v4l2std_g_fmt_mp(struct file *file, void *priv,
 
 	struct v4l2_pix_format_mplane *cur_mp = &mdev->cur_v4l2_fmt.fmt.pix_mp;
 
-	memcpy(mp, cur_mp,sizeof(struct v4l2_pix_format_mplane));
+	memcpy(mp, cur_mp, sizeof(struct v4l2_pix_format_mplane));
 	return 0;
+}
+
+static void moa_v4l2std_init_fmt(struct moa_v4l2std_device *mdev)
+{
+	const struct moa_v4l2std_fmt *fmt;
+	struct v4l2_format *f = &mdev->cur_v4l2_fmt;
+	struct v4l2_pix_format_mplane *mp = &f->fmt.pix_mp;
+	struct v4l2_plane_pix_format *pfmt = mp->plane_fmt;
+	int p;
+
+	memset(mp, 0, sizeof(*mp));
+	fmt = &fmt_array[0];
+
+	mp->field = V4L2_FIELD_NONE;
+
+	mp->width = 1920;
+	mp->height = 1080;
+
+	mp->num_planes = fmt->buffers;
+	for (p = 0; p < mp->num_planes; p++) {
+		u32 bpl = ALIGN(mp->width, 32);
+		u32 stride = DIV_ROUND_UP(bpl * fmt->bpp, 8);
+		pfmt[p].bytesperline = stride;
+		pfmt[p].sizeimage = stride * mp->height;
+
+		memset(pfmt[p].reserved, 0, sizeof(pfmt[p].reserved));
+	}
+
+	mp->colorspace = V4L2_COLORSPACE_SMPTE170M;
+	mp->quantization = V4L2_QUANTIZATION_DEFAULT;
+
+	mp->xfer_func = V4L2_XFER_FUNC_DEFAULT;
+	mp->ycbcr_enc = V4L2_YCBCR_ENC_DEFAULT;
+
+	memset(mp->reserved, 0, sizeof(mp->reserved));
 }
 
 static const struct v4l2_ioctl_ops moa_v4l2_ioctl_ops = {
@@ -264,6 +299,8 @@ static int moa_v4l2std_probe(struct platform_device *pdev)
 
 	moa_v4l2std_queue_init(&mdev->queue, &pdev->dev,
 			       moa_v4l2std_update_fmt);
+
+	moa_v4l2std_init_fmt(mdev);
 
 	// set video device info and register
 	{
