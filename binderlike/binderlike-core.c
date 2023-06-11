@@ -9,22 +9,10 @@
 
 #include "binderlike-core.h"
 
-struct moa_binderlike_msg {
-	char content[256];
-};
-
 enum queue_status {
 	UNINIT,
 	INITED,
 };
-
-/* this struct should export to userspace */
-struct moa_binderlike_queue {
-	volatile int head;
-	volatile int tail;
-	struct moa_binderlike_msg msgs[];
-};
-
 
 struct moa_binderlike_chan_queue {
 	struct moa_binderlike_arg_table arg_table;
@@ -182,6 +170,25 @@ int moa_binderlike_queue_getmsg(struct moa_binderlike_chan *chan, char *buf,
 	log_dbg("head %d - 1 have been read, [%s]\n", q->head, buf);
 
 	return sz;
+}
+
+static void bind_chan_and_fh(struct moa_binderlike_chan *chan, struct moa_binderlike_fh *fh)
+{
+	fh->chan = chan;
+	chan->usr_cnt++;
+	return;
+}
+
+static void unbind_chan_and_fh(struct moa_binderlike_chan *chan, struct moa_binderlike_fh *fh)
+{
+	if (!fh)
+		return;
+	fh->chan->usr_cnt--;
+	if (fh->chan->usr_cnt == 0) {
+		// TODO: release action
+	}
+	fh->chan = NULL;
+	return;
 }
 
 int moa_binderlike_open(struct inode *inode, struct file *filp)
@@ -343,6 +350,32 @@ static int moa_binderlike_register_chan(struct moa_binderlike_device *bdev,
 	return 0;
 }
 
+static int moa_binderlike_acquire_chan(struct moa_binderlike_chan_info *info,
+                                       int *chan_id)
+{
+	int expected_id = chan->id;
+	struct moa_binderlike_chan *chan;
+	if (expected_id >= BINDERLIKE_CHAN_MAX)
+		return -EINVAL;
+
+	if (expected_id < 0)
+		return moa_binderlike_create_chan(info, chan_id);
+
+	chan = gbdev->chan_map[expected_id];
+	if (!chan) {
+		log_err("the chan %d is not init\n", expected_id);
+		return -ENODEV;
+	}
+
+	chan_id = expected_id;
+	info->id = chan_id;
+	info->cache_cnt = chan->sq.cache_cnt;
+        info->mmap_sz =
+            (unsigned int)(&chan->cq.q) - (unsigned int)(&chan->sq.q);
+
+        return 0;
+}
+
 static int
 moa_binderlike_create_chan(struct moa_binderlike_chan_info *info, int *chan_id)
 {
@@ -387,6 +420,7 @@ moa_binderlike_create_chan(struct moa_binderlike_chan_info *info, int *chan_id)
 	}
 
 	info->mmap_sz = chan->memblk_size;
+	info->cq_offset = cq_offset;
 	*chan_id = chan->chan_id;
 	return ret;
 
@@ -427,6 +461,8 @@ static long moa_binderlike_ioctl(struct file *filp, unsigned int cmd,
 			log_err("copy from user failed\n");
 			return ret;
 		}
+
+		moa_binderlike_adjust_info(&info);
 
 		ret = moa_binderlike_create_chan(&info, &new_id);
 		if (ret < 0) {
