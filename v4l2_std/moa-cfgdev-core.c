@@ -58,12 +58,25 @@ struct moa_v4l2std_bound {
 };
 
 #define V4L2STD_CTX_MAX 8
-static struct list_head ctx_arrqy[V4L2STD_CTX_MAX];
+// TODO: parse this param from dts
+#define V4L2STD_VOUT_MAX 9
+static struct list_head ref_ctx_array[V4L2STD_CTX_MAX];
+static DEFINE_SPINLOCK(ref_ctx_spin);
+static struct moa_v4l2std_queue *ref_vout_array[V4L2STD_VOUT_MAX];
+static DEFINE_SPINLOCK(ref_vout_spin);
 
 int moa_cfgdev_bind_queue(unsigned int ctx, int vout,
 			  struct moa_v4l2std_queue *q)
 {
 	struct list_head *head;
+	int vout_idx;
+	unsigned long flags;
+
+	if (!q) {
+		log_err("q is null\n");
+		return -EINVAL;
+	}
+
 	if (ctx >= V4L2STD_CTX_MAX) {
 		log_err("ctx %u is too max", ctx);
 		return -EINVAL;
@@ -71,32 +84,36 @@ int moa_cfgdev_bind_queue(unsigned int ctx, int vout,
 
 	/* TODO: register vout here */
 	(void)vout;
-	head = &ctx_arrqy[ctx];
+	head = &ref_ctx_array[ctx];
 
 	INIT_LIST_HEAD(&q->ctx_node);
+
+	spin_lock_irqsave(&ref_ctx_spin, flags);
 	list_add_tail(&q->ctx_node, head);
+	spin_unlock_irqrestore(&ref_ctx_spin, flags);
+
+	vout_idx = q->vout[0];
+	spin_lock_irqsave(&ref_vout_spin, flags);
+	ref_vout_array[vout_idx] = q;
+	spin_unlock_irqrestore(&ref_vout_spin, flags);
 	return 0;
 }
 
 int moa_cfgdev_unbind_queue(unsigned int ctx, struct moa_v4l2std_queue *q)
 {
+	unsigned long flags;
+	if (!q) {
+		log_err("q is null\n");
+		return -EINVAL;
+	}
+
+	spin_lock_irqsave(&ref_ctx_spin, flags);
 	list_del(&q->ctx_node);
-	return 0;
-}
+	spin_unlock_irqrestore(&ref_ctx_spin, flags);
 
-int moa_cfgdev_parse_dt(struct moa_cfg_dev *cfg_dev)
-{
-	struct device_node *np = cfg_dev->pdev->dev.of_node;
-
-	if (of_property_read_u32(np, "irq-setting", &cfg_dev->irq_setting) <
-	    0) {
-		log_err("fail to read irq-setting\n");
-	}
-
-	cfg_dev->irq_num = of_irq_get_byname(np, "ue");
-	if (cfg_dev->irq_num < 0) {
-		log_err("fail to read irq number\n");
-	}
+	spin_lock_irqsave(&ref_vout_spin, flags);
+	ref_vout_array[q->vout[0]] = NULL;
+	spin_unlock_irqrestore(&ref_vout_spin, flags);
 	return 0;
 }
 
@@ -120,11 +137,59 @@ int moa_cfg_unregister_irqhandle(int ctx)
 	return 0;
 }
 
+static int moa_cfgdev_parse_dt(struct moa_cfg_dev *cfg_dev)
+{
+	struct device_node *np = cfg_dev->pdev->dev.of_node;
+
+	if (of_property_read_u32(np, "irq-setting", &cfg_dev->irq_setting) <
+	    0) {
+		log_err("fail to read irq-setting\n");
+	}
+
+	cfg_dev->irq_num = of_irq_get_byname(np, "ue");
+	if (cfg_dev->irq_num < 0) {
+		log_err("fail to read irq number\n");
+	}
+	return 0;
+}
+
 static enum irqreturn irq_common(int irq, void *data)
 {
 	if (fake_irq_handle)
 		fake_irq_handle(irq, data);
 	return 0;
+}
+
+static int cfg_vout_update_addr(u32 vout, u32 val)
+{
+	// FIXME: it is just a useless demo
+	static void* addr_array[] = {
+		[0] = (void*)0x80000000,
+	};
+
+	writel(val, addr_array[vout]);
+	return 0;
+}
+
+static void moa_cfgdev_update_addr_for_ctx(unsigned int ctx)
+{
+	unsigned long flags;
+	struct moa_v4l2std_queue *q = NULL;
+
+	if (ctx >= ARRAY_SIZE(ref_ctx_array)) {
+		log_err("ctx %u is invalid\n", ctx);
+		return;
+	}
+
+	spin_lock_irqsave(&ref_ctx_spin, flags);
+	list_for_each_entry(q, &ref_ctx_array[ctx], ctx_node) {
+		spin_unlock_irqrestore(&ref_ctx_spin, flags);
+		/* update vout addr according to the queue's vout */
+		moa_v4l2std_queue_handle_buf(q, cfg_vout_update_addr);
+
+		spin_lock_irqsave(&ref_ctx_spin, flags);
+	}
+	spin_unlock_irqrestore(&ref_ctx_spin, flags);
 }
 
 static int moa_cfg_dev_fake_irq(void *data)
@@ -145,15 +210,13 @@ static int moa_cfg_dev_fake_irq(void *data)
 		(void)irq_common(irq_num, (void *)cdev);
 
 		if (loop == SOL) {
-			struct moa_v4l2std_queue *q;
-			list_for_each_entry(q, &ctx_arrqy[0], ctx_node) {
-				moa_v4l2std_queue_handle_buf(q, NULL);
-			}
+			/* 0 is just an example */
+			moa_cfgdev_update_addr_for_ctx(0);
 		}
 
 		if (loop == VOUT_DONE) {
 			struct moa_v4l2std_queue *q;
-			list_for_each_entry(q, &ctx_arrqy[0], ctx_node) {
+			list_for_each_entry(q, &ref_ctx_array[0], ctx_node) {
 				moa_v4l2std_queue_notify_complete(q);
 			}
 		}
@@ -192,8 +255,8 @@ static int moa_cfgdev_irq_init(struct moa_cfg_dev *cfg_dev)
 static void moa_cfgdev_context_init(struct moa_cfg_dev *cdev)
 {
 	int i;
-	for (i = 0; i < ARRAY_SIZE(ctx_arrqy); i++)
-		INIT_LIST_HEAD(&ctx_arrqy[i]);
+	for (i = 0; i < ARRAY_SIZE(ref_ctx_array); i++)
+		INIT_LIST_HEAD(&ref_ctx_array[i]);
 }
 
 static int moa_cfgdev_probe(struct platform_device *pdev)
