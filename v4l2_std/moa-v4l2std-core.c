@@ -249,12 +249,13 @@ static const struct v4l2_ioctl_ops moa_v4l2_ioctl_ops = {
 	.vidioc_streamoff = vb2_ioctl_streamoff,
 };
 
-static int moa_v4l2std_update_fmt(struct device *dev, struct v4l2_format *fmt)
+static int moa_v4l2std_update_fmt(struct device *dev,
+				  struct moa_v4l2std_fmt *mfmt)
 {
 	struct v4l2_device *vdev = dev_get_drvdata(dev);
 	struct moa_v4l2std_device *mdev =
 		container_of(vdev, typeof(*mdev), vdev);
-	struct v4l2_pix_format_mplane *mp = &fmt->fmt.pix_mp;
+	struct v4l2_pix_format_mplane *mp = &mfmt->vfmt.fmt.pix_mp;
 	struct v4l2_pix_format_mplane *cur_mp = &mdev->cur_v4l2_fmt.fmt.pix_mp;
 
 	memcpy(mp, cur_mp, sizeof(struct v4l2_pix_format_mplane));
